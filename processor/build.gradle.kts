@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import groovy.util.Node
+import groovy.util.NodeList
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
@@ -20,7 +22,7 @@ plugins {
     kotlin("jvm")
     kotlin("kapt")
     id("org.jetbrains.dokka")
-    id("com.vanniktech.maven.publish")
+    id("maven-publish")
 }
 
 dependencies {
@@ -44,4 +46,86 @@ tasks.withType<KotlinCompile>().configureEach {
     kotlinOptions {
         jvmTarget = "11" // in order to compile Kotlin to java 11 bytecode
     }
+}
+
+tasks.jar {
+    from(
+        configurations
+            .runtimeClasspath
+            .get()
+            .filter {
+                it.absolutePath.contains("boringYURI", ignoreCase = true)
+                        && !it.absolutePath.contains("boringYURI/api", ignoreCase = true)
+            }
+            .mapNotNull {
+                println("added into fat jar: $it")
+                if (it.isDirectory) it else zipTree(it)
+            })
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            groupId = "com.github.anton-novikau"
+            artifactId = "boringyuri-processor"
+            version = "2.0"
+
+            from(components["java"])
+
+            pom.withXml {
+                val root = asNode()
+
+                val collectedDeps = collectDeps().distinctBy { "${it.group}:${it.name}" }
+
+                (root["dependencies"] as NodeList).forEach { depsNode ->
+                    require(depsNode is Node)
+                    root.remove(depsNode)
+                    val generatedDepsNode = Node(root, "dependencies")
+                    collectedDeps.forEach {
+                        Node(generatedDepsNode, "dependency").apply {
+                            appendNode("groupId", it.group)
+                            appendNode("artifactId", it.name)
+                            appendNode("version", it.version)
+                            if (it.group == "org.jetbrains.kotlin") {
+                                appendNode("scope", "runtime")
+                            } else {
+                                appendNode("scope", "compile")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+// Task just to test output from CLI
+tasks.register("deps") {
+    doLast {
+        val deps = mutableSetOf<Dependency>()
+        collectDependencies(project, deps)
+        println(deps)
+    }
+}
+
+fun collectDeps(): Set<Dependency> {
+    val set = mutableSetOf<Dependency>()
+    collectDependencies(project, set)
+    return set
+}
+
+fun collectDependencies(project: Project, deps: MutableSet<Dependency>) {
+    project.configurations.filter { it.name == "api" || it.name == "implementation" }
+        .forEach { config ->
+            config.dependencies.forEach {
+                if (it.group == "BoringYURI") {
+                    val importedProject = rootProject.findProject(it.name)
+                    collectDependencies(importedProject!!, deps)
+                } else if (it.group != null) {
+                    deps += it
+                }
+            }
+        }
+
 }
